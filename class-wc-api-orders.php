@@ -151,6 +151,7 @@ class WC_API_Orders extends WC_API_Resource {
 		// Get the decimal precession
 		$dp         = ( isset( $filter['dp'] ) ? intval( $filter['dp'] ) : 2 );
 		$order      = wc_get_order( $id );
+                $payment_method_title = $order->get_payment_method_title();
 		$order_data = array(
 			'id'                        => $order->get_id(),
 			'order_number'              => $order->get_order_number(),
@@ -166,12 +167,12 @@ class WC_API_Orders extends WC_API_Resource {
 			'total_shipping'            => wc_format_decimal( $order->get_shipping_total(), $dp ),
 			'cart_tax'                  => wc_format_decimal( $order->get_cart_tax(), $dp ),
 			'shipping_tax'              => wc_format_decimal( $order->get_shipping_tax(), $dp ),
-			'total_discount'            => wc_format_decimal( $order->get_total_discount(), $dp ),
+			'total_discount'            => wc_format_decimal( $order->get_total_discount()+$order->get_discount_tax(), $dp ),
 			'shipping_methods'          => $order->get_shipping_method(),
 			'payment_details' => array(
 				'method_id'    => $order->get_payment_method(),
-				'method_title' => $order->get_payment_method_title(),
-				'paid'         => ! is_null( $order->get_date_paid() ),
+				'method_title' => $payment_method_title,
+				'paid'         => false,
 			),
 			'billing_address' => array(
 				'first_name' => $order->get_billing_first_name(),
@@ -243,7 +244,7 @@ class WC_API_Orders extends WC_API_Resource {
 				'id'           => $shipping_item_id,
 				'method_id'    => $shipping_item->get_method_id(),
 				'method_title' => $shipping_item->get_name(),
-				'total'        => wc_format_decimal( $shipping_item->get_total(), $dp ),
+				'total'        => wc_format_decimal( $shipping_item->get_total()+$shipping_item->get_total_tax(), $dp ),
 			);
 		}
 
@@ -275,7 +276,7 @@ class WC_API_Orders extends WC_API_Resource {
 			$order_data['coupon_lines'][] = array(
 				'id'     => $coupon_item_id,
 				'code'   => $coupon_item->get_code(),
-				'amount' => wc_format_decimal( $coupon_item->get_discount(), $dp ),
+				'amount' => wc_format_decimal( $coupon_item->get_discount()+$coupon_item->get_discount_tax(), $dp ),
 			);
 		}
 
@@ -433,7 +434,7 @@ class WC_API_Orders extends WC_API_Resource {
 				}
 
 				update_post_meta( $order->get_id(), '_payment_method', $data['payment_details']['method_id'] );
-				update_post_meta( $order->get_id(), '_payment_method_title', sanitize_text_field( $data['payment_details']['method_title'] ) );
+				update_post_meta( $order->get_id(), '_payment_method_title', $data['payment_details']['method_title'] );
 
 				// mark as paid if set
 				if ( isset( $data['payment_details']['paid'] ) && true === $data['payment_details']['paid'] ) {
@@ -585,7 +586,7 @@ class WC_API_Orders extends WC_API_Resource {
 
 				// Method title.
 				if ( isset( $data['payment_details']['method_title'] ) ) {
-					update_post_meta( $order->get_id(), '_payment_method_title', sanitize_text_field( $data['payment_details']['method_title'] ) );
+					update_post_meta( $order->get_id(), '_payment_method_title', $data['payment_details']['method_title'] );
 				}
 
 				// Mark as paid if set.
@@ -680,6 +681,7 @@ class WC_API_Orders extends WC_API_Resource {
 
 			$statuses                  = 'wc-' . str_replace( ',', ',wc-', $args['status'] );
 			$statuses                  = explode( ',', $statuses );
+                        array_push($statuses, 'wc-completed-free');
 			$query_args['post_status'] = $statuses;
 
 			unset( $args['status'] );
@@ -973,7 +975,7 @@ class WC_API_Orders extends WC_API_Resource {
 			if ( isset( $variations ) && is_array( $variations ) ) {
 				// start by normalizing the passed variations
 				foreach ( $variations as $key => $value ) {
-					$key = str_replace( 'attribute_', '', wc_attribute_taxonomy_slug( $key ) ); // from get_attributes in class-wc-api-products.php
+					$key = str_replace( 'attribute_', '', str_replace( 'pa_', '', $key ) ); // from get_attributes in class-wc-api-products.php
 					$variations_normalized[ $key ] = strtolower( $value );
 				}
 				// now search through each product child and see if our passed variations match anything
@@ -981,7 +983,7 @@ class WC_API_Orders extends WC_API_Resource {
 					$meta = array();
 					foreach ( get_post_meta( $variation ) as $key => $value ) {
 						$value = $value[0];
-						$key = str_replace( 'attribute_', '', wc_attribute_taxonomy_slug( $key ) );
+						$key = str_replace( 'attribute_', '', str_replace( 'pa_', '', $key ) );
 						$meta[ $key ] = strtolower( $value );
 					}
 					// if the variation array is a part of the $meta array, we found our match
@@ -1458,10 +1460,11 @@ class WC_API_Orders extends WC_API_Resource {
 	 *
 	 * @since 2.2
 	 * @param string $order_id order ID
-	 * @param string|null $fields fields to include in response
+         * @param string|null $fields fields to limit response to
+         * @param array $filter
 	 * @return array|WP_Error
 	 */
-	public function get_order_refunds( $order_id, $fields = null ) {
+	public function get_order_refunds( $order_id, $fields = null, $filter = array()  ) {
 
 		// Ensure ID is valid order ID
 		$order_id = $this->validate_request( $order_id, $this->post_type, 'read' );
@@ -1492,12 +1495,11 @@ class WC_API_Orders extends WC_API_Resource {
 	 *
 	 * @param string $order_id order ID
 	 * @param int $id
-	 * @param string|null $fields fields to limit response to
-	 * @param array $filter
+	 * @param string $fields fields to limit response to
 	 *
 	 * @return array|WP_Error
 	 */
-	public function get_order_refund( $order_id, $id, $fields = null, $filter = array() ) {
+	public function get_order_refund( $order_id, $id, $fields = null ) {
 		try {
 			// Validate order ID
 			$order_id = $this->validate_request( $order_id, $this->post_type, 'read' );
